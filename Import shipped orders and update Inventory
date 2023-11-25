@@ -1,0 +1,89 @@
+import requests
+import base64
+import mysql.connector
+from datetime import datetime, timedelta
+
+# MySQL database configuration
+DB_CONFIG = {
+    'host': '183.82.62.219',
+    'user': 'dbuser',
+    'password': 'A@123456',
+    'database': 'stockandmanagement'
+}
+
+# ShipStation API configuration
+SHIPSTATION_CONFIG = {
+    'api_key': '995c95a21dd74d68a3565bc5cb7f3e36',
+    'api_secret': 'f8687237ce9f47ba886568b2ccfe0752'
+}
+
+mydb = mysql.connector.connect(**DB_CONFIG)
+mycursor = mydb.cursor()
+
+# Calculate the date range for the last 10 days
+end_date = datetime.now()
+start_date = end_date - timedelta(days=10)
+
+# Set the desired page size
+page_size = 500
+
+url = f'https://ssapi.shipstation.com/shipments?shipDateStart={start_date.strftime("%Y-%m-%dT00:00:00")}&shipDateEnd={end_date.strftime("%Y-%m-%dT23:59:59")}&orderStatus=shipped&pageSize={page_size}'
+
+api_key_secret = f"{SHIPSTATION_CONFIG['api_key']}:{SHIPSTATION_CONFIG['api_secret']}"
+headers = {'Authorization': f'Basic {base64.b64encode(api_key_secret.encode()).decode()}'}
+
+all_orders_data = []
+next_page = 1
+
+while True:
+    response = requests.get(url + f'&page={next_page}', headers=headers)
+    data = response.json()
+
+    orders_data = []
+    for shipment in data.get('shipments', []):
+        order_data = {
+            'ShipmentId': shipment.get('shipmentId'),
+            'OrderId': shipment.get('orderId'),
+            'OrderNumber': shipment.get('orderNumber')[:50],
+            'ShipDate': shipment.get('shipDate'),
+            'ShipmentCost': shipment.get('shipmentCost'),
+            'TrackingNumber': shipment.get('trackingNumber'),
+            'serviceCode': shipment.get('serviceCode'),
+            'WarehouseId': shipment.get('warehouseId'),
+            'StoreId': shipment.get('advancedOptions', {}).get('storeId'),
+            'State': shipment.get('shipTo', {}).get('state'),
+            'PostalCode': shipment.get('shipTo', {}).get('postalCode'),
+            'AmountPaid': shipment.get('amountPaid'),
+            'TaxAmount': shipment.get('taxAmount'),
+            'ShippingAmount': shipment.get('shippingAmount')
+        }
+
+        # Check if the order ID already exists in the table
+        existing_order_sql = "SELECT COUNT(*) FROM Shipped_orders_header WHERE OrderId = %s and OrderNumber = %s and TrackingNumber = %s"
+        mycursor.execute(existing_order_sql, (order_data['OrderId'], order_data['OrderNumber'], order_data['TrackingNumber'], ))
+        result = mycursor.fetchone()
+        if result[0] > 0:
+            continue 
+
+        orders_data.append(order_data)
+
+    all_orders_data.extend(orders_data)
+
+    if not data['pages'] or next_page >= data['pages']:
+        break
+
+    next_page += 1
+
+if all_orders_data:
+    placeholders = ', '.join(['%s'] * len(all_orders_data[0]))
+    columns = ', '.join(all_orders_data[0].keys())
+    query = f"INSERT INTO Shipped_orders_header ({columns}) VALUES ({placeholders})"
+    values = [tuple(order.values()) for order in all_orders_data]
+
+    mycursor.executemany(query, values)
+    mydb.commit()
+    print(f"{mycursor.rowcount} rows inserted into the database.")
+else:
+    print("No new data to insert.")
+
+mydb.close()
